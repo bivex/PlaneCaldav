@@ -1,16 +1,3 @@
-# Copyright (c) 2025 Bivex
-#
-# Author: Bivex
-# Available for contact via email: support@b-b.top
-# For up-to-date contact information:
-# https://github.com/bivex
-#
-# Created: 2025-12-27T17:55:32
-# Last Updated: 2025-12-27T17:55:58
-#
-# Licensed under the MIT License.
-# Commercial licensing available upon request.
-
 """CalDAV service for Baïkal integration"""
 
 import asyncio
@@ -351,22 +338,31 @@ class CalDAVService:
         event_uid: str,
         updated_event: CalDAVEvent
     ) -> None:
-        """Update existing event"""
+        """Update existing event by UID (uses direct URL lookup, no extra server requests)"""
         try:
             calendar = await self._get_calendar_client(calendar_url)
 
-            # Find existing event
-            events = await _run_caldav_sync(calendar.events)
-            target_event = None
+            # Try to get event directly by UID (more efficient than fetching all events)
+            # Build event URL from calendar URL and event UID
+            event_url = f"{calendar_url.rstrip('/')}/{event_uid}.ics"
 
-            for event_data in events:
-                ics_calendar = ICSCalendar(event_data.data)
-                for ics_event in ics_calendar.events:
-                    if ics_event.uid == event_uid:
-                        target_event = event_data
+            try:
+                # Try direct access first (no server request for event list)
+                target_event = await _run_caldav_sync(calendar.event_by_url, event_url)
+            except Exception:
+                # Fallback: search through all events (slower but more reliable)
+                logger.debug(f"Direct event access failed, falling back to search for {event_uid}")
+                events = await _run_caldav_sync(calendar.events)
+                target_event = None
+
+                for event_data in events:
+                    ics_calendar = ICSCalendar(event_data.data)
+                    for ics_event in ics_calendar.events:
+                        if ics_event.uid == event_uid:
+                            target_event = event_data
+                            break
+                    if target_event:
                         break
-                if target_event:
-                    break
 
             if not target_event:
                 raise CalDAVError(f"Event {event_uid} not found")
@@ -433,20 +429,31 @@ class CalDAVService:
         retry=retry_if_exception_type(CalDAVError)
     )
     async def delete_event(self, calendar_url: str, event_uid: str) -> None:
-        """Delete event from calendar"""
+        """Delete event from calendar by UID (uses direct URL lookup, no extra server requests)"""
         try:
             calendar = await self._get_calendar_client(calendar_url)
 
-            # Find and delete event
-            events = await _run_caldav_sync(calendar.events)
+            # Try to get event directly by UID (more efficient than fetching all events)
+            event_url = f"{calendar_url.rstrip('/')}/{event_uid}.ics"
 
-            for event_data in events:
-                ics_calendar = ICSCalendar(event_data.data)
-                for ics_event in ics_calendar.events:
-                    if ics_event.uid == event_uid:
-                        await _run_caldav_sync(event_data.delete)
-                        logger.info(f"Deleted event: {event_uid}")
-                        return
+            try:
+                # Try direct access first
+                target_event = await _run_caldav_sync(calendar.event_by_url, event_url)
+                await _run_caldav_sync(target_event.delete)
+                logger.info(f"Deleted event: {event_uid}")
+                return
+            except Exception:
+                # Fallback: search through all events
+                logger.debug(f"Direct event access failed, falling back to search for {event_uid}")
+                events = await _run_caldav_sync(calendar.events)
+
+                for event_data in events:
+                    ics_calendar = ICSCalendar(event_data.data)
+                    for ics_event in ics_calendar.events:
+                        if ics_event.uid == event_uid:
+                            await _run_caldav_sync(event_data.delete)
+                            logger.info(f"Deleted event: {event_uid}")
+                            return
 
             raise CalDAVError(f"Event {event_uid} not found")
 
