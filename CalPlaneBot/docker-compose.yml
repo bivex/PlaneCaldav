@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  calplanebot:
+    build: .
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    environment:
+      # Application Settings
+      - APP_NAME=CalPlaneBot
+      - VERSION=0.1.0
+      - DEBUG=false
+
+      # Server Configuration
+      - HOST=0.0.0.0
+      - PORT=8765
+
+      # Plane Configuration
+      - PLANE_BASE_URL=${PLANE_BASE_URL}
+      - PLANE_API_TOKEN=${PLANE_API_TOKEN}
+      - PLANE_WORKSPACE_SLUG=${PLANE_WORKSPACE_SLUG}
+
+      # CalDAV Configuration
+      - CALDAV_URL=${CALDAV_URL}
+      - CALDAV_USERNAME=${CALDAV_USERNAME}
+      - CALDAV_PASSWORD=${CALDAV_PASSWORD}
+
+      # Optional Webhook Configuration
+      - PLANE_WEBHOOK_SECRET=${PLANE_WEBHOOK_SECRET}
+
+      # Sync Configuration
+      - SYNC_INTERVAL_SECONDS=60
+      - ENABLE_SYNC=true
+      - BIDIRECTIONAL_SYNC=false
+
+      # CalDAV Event Settings
+      - EVENT_DEFAULT_DURATION_HOURS=1
+      - EVENT_TIMEZONE=Europe/Moscow
+
+      # Cache Configuration
+      - CACHE_TTL_SECONDS=3600
+      - MAX_CACHE_SIZE=1000
+
+      # Logging
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8765/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
