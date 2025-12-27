@@ -15,6 +15,13 @@ from app.config import settings
 from app.models.caldav import CalDAVEvent, CalDAVCalendar, EventMapping
 
 
+# Suppress caldav library's "Ical data was modified" warning
+# This is a known compatibility issue with Baïkal server where caldav library
+# auto-fixes minor RFC 5545 deviations in events read from the server.
+# The warning is harmless and only indicates data normalization, not an error.
+logging.getLogger("caldav").setLevel(logging.ERROR)
+
+
 # Helper function to run synchronous caldav operations in thread pool
 async def _run_caldav_sync(func, *args, **kwargs):
     """Run synchronous caldav operation in thread pool"""
@@ -279,6 +286,8 @@ class CalDAVService:
             ics_event.name = event.summary
             ics_event.description = event.description
             ics_event.location = event.location
+            # Set DTSTAMP (required by RFC 5545) - this also sets created timestamp
+            ics_event.created = datetime.now()
 
             # Handle ALL-DAY events (DATE instead of DATETIME)
             if event.all_day:
@@ -342,27 +351,32 @@ class CalDAVService:
         try:
             calendar = await self._get_calendar_client(calendar_url)
 
-            # Try to get event directly by UID (more efficient than fetching all events)
-            # Build event URL from calendar URL and event UID
-            event_url = f"{calendar_url.rstrip('/')}/{event_uid}.ics"
-
+            # Try to get event directly by UID using CalDAV search (efficient, single request)
             try:
-                # Try direct access first (no server request for event list)
-                target_event = await _run_caldav_sync(calendar.event_by_url, event_url)
-            except Exception:
-                # Fallback: search through all events (slower but more reliable)
-                logger.debug(f"Direct event access failed, falling back to search for {event_uid}")
-                events = await _run_caldav_sync(calendar.events)
-                target_event = None
+                # Use calendar.search() with comp filter for VEVENT with specific UID
+                target_event = await _run_caldav_sync(
+                    calendar.event_by_uid, event_uid
+                )
+            except Exception as e:
+                logger.debug(f"event_by_uid failed for {event_uid}: {e}, trying URL access")
+                # Try direct URL access
+                event_url = f"{calendar_url.rstrip('/')}/{event_uid}.ics"
+                try:
+                    target_event = await _run_caldav_sync(calendar.event_by_url, event_url)
+                except Exception:
+                    # Final fallback: search through all events
+                    logger.debug(f"Direct access failed, falling back to full search for {event_uid}")
+                    events = await _run_caldav_sync(calendar.events)
+                    target_event = None
 
-                for event_data in events:
-                    ics_calendar = ICSCalendar(event_data.data)
-                    for ics_event in ics_calendar.events:
-                        if ics_event.uid == event_uid:
-                            target_event = event_data
+                    for event_data in events:
+                        ics_calendar = ICSCalendar(event_data.data)
+                        for ics_event in ics_calendar.events:
+                            if ics_event.uid == event_uid:
+                                target_event = event_data
+                                break
+                        if target_event:
                             break
-                    if target_event:
-                        break
 
             if not target_event:
                 raise CalDAVError(f"Event {event_uid} not found")
@@ -373,6 +387,8 @@ class CalDAVService:
             ics_event.name = updated_event.summary
             ics_event.description = updated_event.description
             ics_event.location = updated_event.location
+            # Set DTSTAMP (required by RFC 5545) - update timestamp
+            ics_event.created = datetime.now()
 
             # Handle ALL-DAY events (DATE instead of DATETIME)
             if updated_event.all_day:
@@ -433,27 +449,33 @@ class CalDAVService:
         try:
             calendar = await self._get_calendar_client(calendar_url)
 
-            # Try to get event directly by UID (more efficient than fetching all events)
-            event_url = f"{calendar_url.rstrip('/')}/{event_uid}.ics"
-
+            # Try to get event directly by UID using CalDAV search (efficient, single request)
             try:
-                # Try direct access first
-                target_event = await _run_caldav_sync(calendar.event_by_url, event_url)
+                target_event = await _run_caldav_sync(calendar.event_by_uid, event_uid)
                 await _run_caldav_sync(target_event.delete)
                 logger.info(f"Deleted event: {event_uid}")
                 return
-            except Exception:
-                # Fallback: search through all events
-                logger.debug(f"Direct event access failed, falling back to search for {event_uid}")
-                events = await _run_caldav_sync(calendar.events)
+            except Exception as e:
+                logger.debug(f"event_by_uid failed for {event_uid}: {e}, trying URL access")
+                # Try direct URL access
+                event_url = f"{calendar_url.rstrip('/')}/{event_uid}.ics"
+                try:
+                    target_event = await _run_caldav_sync(calendar.event_by_url, event_url)
+                    await _run_caldav_sync(target_event.delete)
+                    logger.info(f"Deleted event: {event_uid}")
+                    return
+                except Exception:
+                    # Final fallback: search through all events
+                    logger.debug(f"Direct access failed, falling back to full search for {event_uid}")
+                    events = await _run_caldav_sync(calendar.events)
 
-                for event_data in events:
-                    ics_calendar = ICSCalendar(event_data.data)
-                    for ics_event in ics_calendar.events:
-                        if ics_event.uid == event_uid:
-                            await _run_caldav_sync(event_data.delete)
-                            logger.info(f"Deleted event: {event_uid}")
-                            return
+                    for event_data in events:
+                        ics_calendar = ICSCalendar(event_data.data)
+                        for ics_event in ics_calendar.events:
+                            if ics_event.uid == event_uid:
+                                await _run_caldav_sync(event_data.delete)
+                                logger.info(f"Deleted event: {event_uid}")
+                                return
 
             raise CalDAVError(f"Event {event_uid} not found")
 
