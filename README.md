@@ -1,9 +1,8 @@
 # CalPlaneBot - Plane CalDAV Integration & Task Synchronization
 
-<img width="1350" height="698" alt="" src="https://github.com/user-attachments/assets/6010dfd9-4a2a-49f5-aff2-b5742f497d83" />
+<img width="1378" height="935" alt="" src="https://github.com/user-attachments/assets/5f4b5fcc-b449-47d4-aa77-80d8025232ab" />
 
-
-<img width="1404" height="824" alt="" src="https://github.com/user-attachments/assets/fd1bd0d9-7914-4366-a7c5-0804dcc4566a" />
+<img width="1405" height="1103" alt="" src="https://github.com/user-attachments/assets/3d31cca9-57b0-420f-8cc7-16ee97cc8d2f" />
 
 
 # CalPlaneBot - Plane to CalDAV Task Sync & Calendar Integration
