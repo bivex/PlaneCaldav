@@ -5,8 +5,8 @@
 # For up-to-date contact information:
 # https://github.com/bivex
 #
-# Created: 2025-12-27T18:43:36
-# Last Updated: 2025-12-27T18:43:45
+# Created: 2025-12-27T19:38:07
+# Last Updated: 2025-12-27T19:38:12
 #
 # Licensed under the MIT License.
 # Commercial licensing available upon request.
@@ -305,9 +305,19 @@ class CalDAVService:
             # Handle ALL-DAY events (DATE instead of DATETIME)
             if event.all_day:
                 # For all-day events, use date objects (not datetime)
-                ics_event.begin = event.start.date()
-                ics_event.end = event.end.date() if event.end else (event.start + timedelta(days=1)).date()
-                ics_event.make_all_day()
+                # RFC 5545: DTEND for all-day events is exclusive (next day after event ends)
+                start_date = event.start.date()
+                # If event.end is set and different from start, use it; otherwise single-day event
+                if event.end and event.end.date() > start_date:
+                    # Multi-day event: DTEND = end_date + 1 (exclusive)
+                    end_date = event.end.date() + timedelta(days=1)
+                else:
+                    # Single-day event: DTEND = start_date + 1 (exclusive)
+                    end_date = start_date + timedelta(days=1)
+                ics_event.begin = start_date
+                ics_event.end = end_date
+                # Note: When setting date objects (not datetime), ICS library already
+                # treats them as all-day events. DO NOT call make_all_day() as it adds another day!
             else:
                 # Regular timed events
                 ics_event.begin = event.start
@@ -406,9 +416,19 @@ class CalDAVService:
             # Handle ALL-DAY events (DATE instead of DATETIME)
             if updated_event.all_day:
                 # For all-day events, use date objects (not datetime)
-                ics_event.begin = updated_event.start.date()
-                ics_event.end = updated_event.end.date() if updated_event.end else (updated_event.start + timedelta(days=1)).date()
-                ics_event.make_all_day()
+                # RFC 5545: DTEND for all-day events is exclusive (next day after event ends)
+                start_date = updated_event.start.date()
+                # If event.end is set and different from start, use it; otherwise single-day event
+                if updated_event.end and updated_event.end.date() > start_date:
+                    # Multi-day event: DTEND = end_date + 1 (exclusive)
+                    end_date = updated_event.end.date() + timedelta(days=1)
+                else:
+                    # Single-day event: DTEND = start_date + 1 (exclusive)
+                    end_date = start_date + timedelta(days=1)
+                ics_event.begin = start_date
+                ics_event.end = end_date
+                # Note: When setting date objects (not datetime), ICS library already
+                # treats them as all-day events. DO NOT call make_all_day() as it adds another day!
             else:
                 # Regular timed events
                 ics_event.begin = updated_event.start

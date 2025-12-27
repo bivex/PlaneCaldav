@@ -5,8 +5,8 @@
 # For up-to-date contact information:
 # https://github.com/bivex
 #
-# Created: 2025-12-27T18:43:42
-# Last Updated: 2025-12-27T18:43:44
+# Created: 2025-12-27T19:37:51
+# Last Updated: 2025-12-27T19:37:51
 #
 # Licensed under the MIT License.
 # Commercial licensing available upon request.
@@ -147,11 +147,18 @@ class SyncService:
         # Generate unique UID
         uid = f"plane-issue-{issue.id}@{settings.app_name.lower()}"
 
-        # Create ALL-DAY event from target_date (due date)
-        # Plane stores only DATE (no time), so we create ALL-DAY events
-        # ALL-DAY events: DTEND = DTSTART + 1 day (RFC 5545)
-        start_time = datetime.combine(issue.target_date, datetime.min.time())
-        end_time = start_time + timedelta(days=1)  # RFC requirement for all-day
+        # Create ALL-DAY event using Plane dates
+        # Plane has: start_date (optional) and target_date (due date)
+        # - If both exist: event spans from start_date to target_date
+        # - If only target_date: single-day event on target_date
+        if issue.start_date and issue.start_date < issue.target_date:
+            # Multi-day event: start_date to target_date
+            start_time = datetime.combine(issue.start_date, datetime.min.time())
+            end_time = datetime.combine(issue.target_date, datetime.min.time())
+        else:
+            # Single-day event on target_date
+            start_time = datetime.combine(issue.target_date, datetime.min.time())
+            end_time = start_time
         all_day = True
 
         # Set status based on completion state
