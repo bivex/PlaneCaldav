@@ -155,7 +155,7 @@ def main():
         auth_type = "digest"
         url = "https://cal.x-x.top/dav.php"
         username = "admin"
-        password = "7jLkj0|ZC(*Ebn|m"
+        password = "7jLkj01111(*Ebn|m"
 
     # Validate authentication type
     if auth_type.lower() not in ['digest', 'basic']:
