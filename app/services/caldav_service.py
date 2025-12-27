@@ -5,8 +5,8 @@
 # For up-to-date contact information:
 # https://github.com/bivex
 #
-# Created: 2025-12-27T14:00:23
-# Last Updated: 2025-12-27T14:05:45
+# Created: 2025-12-27T17:55:32
+# Last Updated: 2025-12-27T17:55:58
 #
 # Licensed under the MIT License.
 # Commercial licensing available upon request.
@@ -261,7 +261,7 @@ class CalDAVService:
                         url=ics_event.url,
                         created=ics_event.created.datetime if ics_event.created else None,
                         last_modified=ics_event.last_modified.datetime if ics_event.last_modified else None,
-                        raw_ics=str(ics_event)
+                        raw_ics=ics_event.serialize() if hasattr(ics_event, 'serialize') else None
                     )
                     result.append(event)
 
@@ -319,14 +319,19 @@ class CalDAVService:
                 ics_event.organizer = event.organizer
 
             if event.attendees:
-                ics_event.attendees = event.attendees
+                # Ensure proper mailto: format for attendees (RFC 5545)
+                ics_event.attendees = [
+                    f"mailto:{att}" if not att.startswith("mailto:") else att
+                    for att in event.attendees
+                ]
 
             # Create calendar with event
             ics_calendar = ICSCalendar()
+            ics_calendar.creator = "CalPlaneBot/1.0"  # Sets PRODID to avoid warnings
             ics_calendar.events.add(ics_event)
 
-            # Save to CalDAV
-            calendar_event = await _run_caldav_sync(calendar.save_event, str(ics_calendar))
+            # Save to CalDAV (use serialize() instead of str() to avoid FutureWarning)
+            calendar_event = await _run_caldav_sync(calendar.save_event, ics_calendar.serialize())
 
             logger.info(f"Created event: {event.summary} in calendar {calendar_url}")
             return event.uid
@@ -401,14 +406,19 @@ class CalDAVService:
                 ics_event.organizer = updated_event.organizer
 
             if updated_event.attendees:
-                ics_event.attendees = updated_event.attendees
+                # Ensure proper mailto: format for attendees (RFC 5545)
+                ics_event.attendees = [
+                    f"mailto:{att}" if not att.startswith("mailto:") else att
+                    for att in updated_event.attendees
+                ]
 
             # Create calendar with updated event
             ics_calendar = ICSCalendar()
+            ics_calendar.creator = "CalPlaneBot/1.0"  # Sets PRODID to avoid warnings
             ics_calendar.events.add(ics_event)
 
-            # Update in CalDAV
-            target_event.data = str(ics_calendar)
+            # Update in CalDAV (use serialize() instead of str() to avoid FutureWarning)
+            target_event.data = ics_calendar.serialize()
             await _run_caldav_sync(target_event.save)
 
             logger.info(f"Updated event: {event_uid}")

@@ -5,8 +5,8 @@
 # For up-to-date contact information:
 # https://github.com/bivex
 #
-# Created: 2025-12-27T14:00:23
-# Last Updated: 2025-12-27T14:05:45
+# Created: 2025-12-27T17:55:45
+# Last Updated: 2025-12-27T17:55:57
 #
 # Licensed under the MIT License.
 # Commercial licensing available upon request.
@@ -36,6 +36,13 @@ class SyncService:
         # In-memory mappings (should be persisted in production)
         self.project_mappings: Dict[str, SyncMapping] = {}
         self.event_mappings: Dict[str, EventMapping] = {}
+
+        # Per-sync events cache: calendar_url -> {event_uid -> CalDAVEvent}
+        # This cache is populated at the start of sync and cleared at the end
+        self._events_cache: Dict[str, Dict[str, CalDAVEvent]] = {}
+
+        # Sync lock to prevent overlapping syncs
+        self._sync_in_progress = False
 
     async def initialize_project_mappings(self) -> None:
         """Initialize calendar mappings for Plane projects"""
@@ -106,6 +113,28 @@ class SyncService:
         mapping = self.project_mappings.get(project_id)
         return mapping.caldav_calendar_url if mapping else None
 
+    async def _get_events_cache(self, calendar_url: str) -> Dict[str, CalDAVEvent]:
+        """Get or populate events cache for a calendar (O(1) lookup by UID)"""
+        if calendar_url not in self._events_cache:
+            events = await caldav_service.get_calendar_events(calendar_url)
+            # Build a dict for O(1) lookup by UID
+            self._events_cache[calendar_url] = {event.uid: event for event in events}
+            logger.debug(f"Cached {len(events)} events for calendar {calendar_url}")
+        return self._events_cache[calendar_url]
+
+    def _clear_events_cache(self) -> None:
+        """Clear the per-sync events cache"""
+        self._events_cache.clear()
+        logger.debug("Cleared events cache")
+
+    def _invalidate_event_in_cache(self, calendar_url: str, event_uid: str, new_event: Optional[CalDAVEvent] = None) -> None:
+        """Update or remove a single event from cache"""
+        if calendar_url in self._events_cache:
+            if new_event:
+                self._events_cache[calendar_url][event_uid] = new_event
+            elif event_uid in self._events_cache[calendar_url]:
+                del self._events_cache[calendar_url][event_uid]
+
     def plane_issue_to_caldav_event(self, issue: PlaneIssue) -> Optional[CalDAVEvent]:
         """Convert Plane issue to CalDAV event
 
@@ -170,41 +199,51 @@ class SyncService:
     async def sync_issue_to_calendar(
         self,
         issue: PlaneIssue,
-        calendar_url: str
+        calendar_url: str,
+        use_cache: bool = True
     ) -> None:
-        """Sync single issue to calendar"""
+        """Sync single issue to calendar
+
+        Args:
+            issue: Plane issue to sync
+            calendar_url: Target CalDAV calendar URL
+            use_cache: If True, use cached events for O(1) lookup (default: True)
+        """
         try:
             # Convert to CalDAV event
             event = self.plane_issue_to_caldav_event(issue)
+            event_uid = f"plane-issue-{issue.id}@{settings.app_name.lower()}"
 
             # If no target_date → no event
             if event is None:
                 # Check if event exists in calendar and delete it
-                event_uid = f"plane-issue-{issue.id}@{settings.app_name.lower()}"
                 try:
                     await caldav_service.delete_event(calendar_url, event_uid)
+                    self._invalidate_event_in_cache(calendar_url, event_uid)
                     logger.info(f"Deleted event for issue {issue.sequence_id} (no target_date)")
                 except Exception:
                     # Event doesn't exist or already deleted - that's fine
                     pass
                 return
 
-            # Check if event already exists
-            existing_events = await caldav_service.get_calendar_events(calendar_url)
-            existing_event = None
-
-            for existing in existing_events:
-                if existing.uid == event.uid:
-                    existing_event = existing
-                    break
+            # Check if event already exists using cache (O(1) lookup)
+            if use_cache:
+                events_cache = await self._get_events_cache(calendar_url)
+                existing_event = events_cache.get(event.uid)
+            else:
+                # Fallback to direct query (for webhook handlers, etc.)
+                existing_events = await caldav_service.get_calendar_events(calendar_url)
+                existing_event = next((e for e in existing_events if e.uid == event.uid), None)
 
             if existing_event:
                 # Update existing event
                 await caldav_service.update_event(calendar_url, event.uid, event)
+                self._invalidate_event_in_cache(calendar_url, event.uid, event)
                 logger.info(f"Updated event for issue {issue.sequence_id}: {issue.name}")
             else:
                 # Create new event
                 await caldav_service.create_event(calendar_url, event)
+                self._invalidate_event_in_cache(calendar_url, event.uid, event)
                 logger.info(f"Created event for issue {issue.sequence_id}: {issue.name}")
 
             # Update mapping
@@ -222,7 +261,10 @@ class SyncService:
             raise
 
     async def sync_project_issues_with_cleanup(self, project_id: str, calendar_url: str) -> tuple[int, int]:
-        """Sync all issues for a project and return (synced_count, deleted_count)"""
+        """Sync all issues for a project and return (synced_count, deleted_count)
+
+        Uses cached events for O(1) lookups - only 1 CalDAV request per project!
+        """
         try:
             # Get ALL issues from Plane (including completed ones)
             # Completed issues will be synced with STATUS:COMPLETED (strikethrough in calendar)
@@ -230,18 +272,16 @@ class SyncService:
 
             logger.info(f"Syncing {len(issues)} issues (including completed) for project {project_id}")
 
-            # Get existing events from calendar
-            existing_events = await caldav_service.get_calendar_events(calendar_url)
+            # Get existing events from cache (single CalDAV request, O(1) lookup)
+            events_cache = await self._get_events_cache(calendar_url)
 
             # Create sets of UIDs for comparison
-            current_issue_uids = set()
+            current_issue_uids: Set[str] = set()
             for issue in issues:
                 uid = f"plane-issue-{issue.id}@{settings.app_name.lower()}"
                 current_issue_uids.add(uid)
 
-            existing_event_uids = set()
-            for event in existing_events:
-                existing_event_uids.add(event.uid)
+            existing_event_uids = set(events_cache.keys())
 
             # Find events to delete (exist in calendar but not in current issues)
             events_to_delete = existing_event_uids - current_issue_uids
@@ -251,15 +291,16 @@ class SyncService:
             for event_uid in events_to_delete:
                 try:
                     await caldav_service.delete_event(calendar_url, event_uid)
+                    self._invalidate_event_in_cache(calendar_url, event_uid)
                     logger.info(f"Deleted old event {event_uid} for project {project_id}")
                     deleted_count += 1
                 except Exception as e:
                     logger.warning(f"Failed to delete event {event_uid}: {e}")
 
-            # Sync each current issue
+            # Sync each current issue (uses cache internally)
             synced_count = 0
             for issue in issues:
-                await self.sync_issue_to_calendar(issue, calendar_url)
+                await self.sync_issue_to_calendar(issue, calendar_url, use_cache=True)
                 synced_count += 1
 
             # Update project mapping sync time
@@ -274,7 +315,10 @@ class SyncService:
             raise
 
     async def sync_project_issues(self, project_id: str) -> None:
-        """Sync all issues for a project"""
+        """Sync all issues for a project
+
+        Uses cached events for O(1) lookups - only 1 CalDAV request per project!
+        """
         try:
             # Get calendar for project
             calendar_url = self.get_calendar_for_project(project_id)
@@ -288,18 +332,16 @@ class SyncService:
 
             logger.info(f"Syncing {len(issues)} issues (including completed) for project {project_id}")
 
-            # Get existing events from calendar
-            existing_events = await caldav_service.get_calendar_events(calendar_url)
+            # Get existing events from cache (single CalDAV request, O(1) lookup)
+            events_cache = await self._get_events_cache(calendar_url)
 
             # Create sets of UIDs for comparison
-            current_issue_uids = set()
+            current_issue_uids: Set[str] = set()
             for issue in issues:
                 uid = f"plane-issue-{issue.id}@{settings.app_name.lower()}"
                 current_issue_uids.add(uid)
 
-            existing_event_uids = set()
-            for event in existing_events:
-                existing_event_uids.add(event.uid)
+            existing_event_uids = set(events_cache.keys())
 
             # Find events to delete (exist in calendar but not in current issues)
             events_to_delete = existing_event_uids - current_issue_uids
@@ -309,15 +351,16 @@ class SyncService:
             for event_uid in events_to_delete:
                 try:
                     await caldav_service.delete_event(calendar_url, event_uid)
+                    self._invalidate_event_in_cache(calendar_url, event_uid)
                     logger.info(f"Deleted old event {event_uid} for project {project_id}")
                     deleted_count += 1
                 except Exception as e:
                     logger.warning(f"Failed to delete event {event_uid}: {e}")
 
-            # Sync each current issue
+            # Sync each current issue (uses cache internally)
             synced_count = 0
             for issue in issues:
-                await self.sync_issue_to_calendar(issue, calendar_url)
+                await self.sync_issue_to_calendar(issue, calendar_url, use_cache=True)
                 synced_count += 1
 
             # Update project mapping sync time
@@ -332,13 +375,19 @@ class SyncService:
             raise
 
     async def sync_all_projects(self) -> None:
-        """Sync all projects"""
+        """Sync all projects with sync lock and cache management"""
+        # Prevent overlapping syncs
+        if self._sync_in_progress:
+            logger.warning("Sync already in progress, skipping this cycle")
+            return
+
+        self._sync_in_progress = True
         try:
             # Initialize mappings if needed
             if not self.project_mappings:
                 await self.initialize_project_mappings()
 
-            # Sync each project
+            # Sync each project (cache is populated per-calendar automatically)
             for project_id in self.project_mappings.keys():
                 await self.sync_project_issues(project_id)
 
@@ -347,9 +396,19 @@ class SyncService:
         except Exception as e:
             logger.error(f"Failed to sync all projects: {e}")
             raise
+        finally:
+            # Always clear cache and release lock
+            self._clear_events_cache()
+            self._sync_in_progress = False
 
     async def sync_updated_issues(self, since: datetime) -> None:
-        """Sync only issues updated since specified time"""
+        """Sync only issues updated since specified time with sync lock and cache management"""
+        # Prevent overlapping syncs
+        if self._sync_in_progress:
+            logger.warning("Sync already in progress, skipping this cycle")
+            return
+
+        self._sync_in_progress = True
         try:
             logger.info(f"sync_updated_issues called with since={since}")
             # Always reinitialize mappings to avoid stale data after container restarts
@@ -382,6 +441,10 @@ class SyncService:
         except Exception as e:
             logger.error(f"Failed to sync updated issues: {e}")
             raise
+        finally:
+            # Always clear cache and release lock
+            self._clear_events_cache()
+            self._sync_in_progress = False
 
     async def cleanup_completed_events(self) -> None:
         """Remove events for completed issues (optional cleanup)"""
