@@ -5,8 +5,8 @@
 # For up-to-date contact information:
 # https://github.com/bivex
 #
-# Created: 2025-12-27T17:55:45
-# Last Updated: 2025-12-27T17:55:57
+# Created: 2025-12-27T18:43:42
+# Last Updated: 2025-12-27T18:43:44
 #
 # Licensed under the MIT License.
 # Commercial licensing available upon request.
@@ -402,7 +402,12 @@ class SyncService:
             self._sync_in_progress = False
 
     async def sync_updated_issues(self, since: datetime) -> None:
-        """Sync only issues updated since specified time with sync lock and cache management"""
+        """Sync all projects to detect deleted issues and sync updates.
+
+        IMPORTANT: We sync ALL projects, not just those with updated issues.
+        This is necessary because deleted issues don't appear in 'updated_after' queries,
+        so we need to compare calendar events with current Plane issues for each project.
+        """
         # Prevent overlapping syncs
         if self._sync_in_progress:
             logger.warning("Sync already in progress, skipping this cycle")
@@ -415,28 +420,21 @@ class SyncService:
             logger.info("Reinitializing project mappings...")
             await self.initialize_project_mappings()
 
-            # Get all updated issues
-            updated_issues = await plane_service.get_all_issues(updated_after=since)
-
-            # Group by project - but we need to handle cleanup for projects with updates
-            updated_issues_by_project: Dict[str, List[PlaneIssue]] = {}
-            for issue in updated_issues:
-                if issue.project_id not in updated_issues_by_project:
-                    updated_issues_by_project[issue.project_id] = []
-                updated_issues_by_project[issue.project_id].append(issue)
-
-            # For projects with updated issues, sync ALL issues and clean up old events
+            # Sync ALL projects to detect deleted issues
+            # (deleted issues don't appear in updated_after queries)
             total_synced = 0
             total_deleted = 0
-            for project_id in updated_issues_by_project.keys():
-                calendar_url = self.get_calendar_for_project(project_id)
+
+            for project_id, mapping in self.project_mappings.items():
+                calendar_url = mapping.caldav_calendar_url
                 if calendar_url:
-                    # Sync all issues for this project (not just updated ones) to enable cleanup
-                    synced_count, deleted_count = await self.sync_project_issues_with_cleanup(project_id, calendar_url)
+                    synced_count, deleted_count = await self.sync_project_issues_with_cleanup(
+                        project_id, calendar_url
+                    )
                     total_synced += synced_count
                     total_deleted += deleted_count
 
-            logger.info(f"Synced {total_synced} issues, deleted {total_deleted} old events")
+            logger.info(f"Synced {total_synced} issues, deleted {total_deleted} old events across all projects")
 
         except Exception as e:
             logger.error(f"Failed to sync updated issues: {e}")
