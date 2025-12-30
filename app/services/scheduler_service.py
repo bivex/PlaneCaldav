@@ -5,8 +5,8 @@
 # For up-to-date contact information:
 # https://github.com/bivex
 #
-# Created: 2025-12-27T14:00:23
-# Last Updated: 2025-12-27T19:37:50
+# Created: 2025-12-30T10:03:00
+# Last Updated: 2025-12-30T10:03:04
 #
 # Licensed under the MIT License.
 # Commercial licensing available upon request.
@@ -14,8 +14,13 @@
 """Scheduler service for periodic synchronization"""
 
 import asyncio
+import atexit
+import json
 import logging
+import signal
+import os
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -34,6 +39,15 @@ class SchedulerService:
     def __init__(self):
         self.scheduler: Optional[AsyncIOScheduler] = None
         self.is_running = False
+        self._state_file = Path("/app/data/scheduler_state.json")
+        # Create data directory if it doesn't exist (with proper permissions)
+        self._state_file.parent.mkdir(exist_ok=True, mode=0o755)
+        self._last_sync_time = self._load_last_sync_time()
+
+        # Register signal handlers for graceful shutdown
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+        atexit.register(self._save_state_on_exit)
 
     async def start_scheduler(self) -> None:
         """Start the scheduler"""
@@ -94,16 +108,48 @@ class SchedulerService:
 
         logger.info("Scheduler stopped")
 
+    def _load_last_sync_time(self) -> Optional[datetime]:
+        """Load last sync time from persistent storage"""
+        try:
+            if self._state_file.exists():
+                with open(self._state_file, 'r') as f:
+                    data = json.load(f)
+                    if 'last_sync_time' in data:
+                        return datetime.fromisoformat(data['last_sync_time'])
+        except Exception as e:
+            logger.warning(f"Failed to load last sync time: {e}")
+
+        # Default: 24 hours ago if no saved state
+        return datetime.now() - timedelta(hours=24)
+
+    def _save_last_sync_time(self, sync_time: datetime) -> None:
+        """Save last sync time to persistent storage"""
+        try:
+            data = {
+                'last_sync_time': sync_time.isoformat(),
+                'updated_at': datetime.now().isoformat()
+            }
+            with open(self._state_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save last sync time: {e}")
+
     async def _sync_job(self) -> None:
         """Scheduled sync job"""
         try:
             logger.info("Starting scheduled sync")
 
-            # Get last sync time (simplified - should be persisted)
-            last_sync = datetime.now() - timedelta(seconds=settings.sync_interval_seconds)
+            # Use persisted last sync time, or default to interval ago
+            last_sync = self._last_sync_time or (datetime.now() - timedelta(seconds=settings.sync_interval_seconds))
+
+            logger.info(f"Syncing issues updated since: {last_sync}")
 
             # Sync updated issues
             await sync_service.sync_updated_issues(last_sync)
+
+            # Update and persist last sync time
+            self._last_sync_time = datetime.now()
+            self._save_last_sync_time(self._last_sync_time)
 
             logger.info("Scheduled sync completed")
 
@@ -122,6 +168,20 @@ class SchedulerService:
 
         except Exception as e:
             logger.error(f"Scheduled cleanup failed: {e}")
+
+    def _signal_handler(self, signum, frame) -> None:
+        """Handle termination signals for graceful shutdown"""
+        logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+        asyncio.create_task(self.stop_scheduler())
+
+    def _save_state_on_exit(self) -> None:
+        """Save state when process exits"""
+        try:
+            if self._last_sync_time:
+                self._save_last_sync_time(self._last_sync_time)
+                logger.info("Scheduler state saved on exit")
+        except Exception as e:
+            logger.error(f"Failed to save state on exit: {e}")
 
     async def trigger_manual_sync(self) -> Dict[str, Any]:
         """Trigger manual synchronization"""
@@ -166,7 +226,10 @@ class SchedulerService:
 
         return {
             "status": "running",
-            "jobs": jobs
+            "jobs": jobs,
+            "last_sync_time": self._last_sync_time.isoformat() if self._last_sync_time else None,
+            "state_file": str(self._state_file),
+            "state_file_exists": self._state_file.exists()
         }
 
 

@@ -47,6 +47,7 @@ services:
       - LOG_LEVEL=INFO
     volumes:
       - ./logs:/app/logs
+    user: root
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://127.0.0.1:8765/health || exit 1"]
